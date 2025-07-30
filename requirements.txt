@@ -1,0 +1,2 @@
+mutagen>=1.45.0
+pytaglib>=1.4.6
