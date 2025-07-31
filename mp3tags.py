@@ -1,15 +1,17 @@
 """
     This script renames audio files based on their metadata tags, organizes them into artist and album directories,
-    and handles duplicates intelligently. It uses the Mutagen library to read metadata tags from audio files.
+    and handles duplicates intelligently. It uses the pytaglib library (with mutagen as fallback) to read metadata tags from audio files.
     
     Supported formats: MP3, FLAC, OGG, MP4/M4A, WMA, AAC, OPUS (configurable via INI file)
 
     Features:
         - Multi-format audio file processing (configurable)
+        - Efficient tag extraction with pytaglib (fallback to mutagen)
         - Intelligent duplicate detection and handling
         - Configurable logging with file and console output
         - Command-line and configuration file support
         - INI-based configuration for logging and audio formats
+        - Tabular output for processing statistics
 
     Configuration:
         The script reads settings from mp3tags.ini file with sections:
@@ -33,7 +35,7 @@ Keyword arguments:
         get_audio_extensions(config) -- Gets audio file extensions from INI config or returns defaults.
         rename_files(directory, logger, audio_extensions) -- Renames audio files in the specified directory based on their metadata tags.
         rename_files_in_subdirectories(source_directory, logger, audio_extensions) -- Renames audio files in all subdirectories of the specified source directory.
-        audio_tag(filename, logger) -- Extracts the tags from an audio file using Mutagen.
+        audio_tag(filename, logger) -- Extracts the tags from an audio file using pytaglib (preferred) or mutagen (fallback).
         clean_string(s) -- Cleans a string by removing invalid characters for filenames.
         file_hash(filepath, chunk_size=8192) -- Computes SHA256 hash of a file.
         main(source_directory, storage_directory, logger, audio_extensions) -- Main function to process audio files and organize them into the storage directory.
@@ -50,7 +52,6 @@ Keyword arguments:
 TODO: 
     - Implement the renaming logic based on metadata tags
     - Generate playlists based on the newly added files
-    - Handle duplicate files intelligently
     - Add monitoring for new files in the source directory
 
 """
@@ -59,6 +60,7 @@ TODO:
 import os
 import argparse
 import shutil
+import time
 import hashlib
 import configparser
 import logging
@@ -68,8 +70,6 @@ try:
 except ImportError:
     PYTAGLIB_AVAILABLE = False
 from mutagen import File
-from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, TIT2
 
 def setup_logging(verbose=False, quiet=False, log_file='mp3tags.log', config=None):
     """Setup logging configuration and return logger instance."""
@@ -80,34 +80,23 @@ def setup_logging(verbose=False, quiet=False, log_file='mp3tags.log', config=Non
     # Override with INI config if provided
     if config:
         try:
-            # Get logging level from config
             level_str = config.get('logging', 'level', fallback='INFO').upper()
-            log_level = getattr(logging, level_str, logging.INFO)
-            
-            # Get log file from config
+            log_level = getattr(logging, level_str, logging.INFO)                        
             log_file = config.get('logging', 'log_file', fallback=log_file)
-            
-            # Get console output setting
-            console_output = config.getboolean('logging', 'console_output', fallback=True)
-            
-            # Get log format from config
+            console_output = config.getboolean('logging', 'console_output', fallback=True)            
             log_format = config.get('logging', 'format', fallback=log_format)
         except (configparser.NoSectionError, configparser.NoOptionError):
-            pass  # Use defaults if section/option doesn't exist
+            pass
     
-    # Command-line arguments override INI settings
     if verbose:
         log_level = logging.DEBUG
     elif quiet:
         log_level = logging.ERROR
     
-    # Setup handlers
     handlers = []
     
-    # Always add file handler
     handlers.append(logging.FileHandler(log_file))
     
-    # Add console handler if enabled
     if console_output and not quiet:
         handlers.append(logging.StreamHandler())
     
@@ -115,7 +104,7 @@ def setup_logging(verbose=False, quiet=False, log_file='mp3tags.log', config=Non
         level=log_level,
         format=log_format,
         handlers=handlers,
-        force=True  # Force reconfiguration if already configured
+        force=True
     )
     return logging.getLogger(__name__)
 
@@ -136,7 +125,7 @@ def get_audio_extensions(config=None):
                     extensions.append(ext)
                 return tuple(extensions)
         except (configparser.NoSectionError, configparser.NoOptionError):
-            pass  # Use defaults if section/option doesn't exist
+            pass
     
     return default_extensions
 
@@ -156,10 +145,8 @@ def rename_files(directory: str, logger: logging.Logger, audio_extensions=None) 
             try:
                 audio = File(file_path)
                 if audio is not None and audio.tags:
-                    # Get title from various tag formats
                     title = None
                     if hasattr(audio.tags, 'get'):
-                        # For most formats
                         title = (audio.tags.get('TIT2') or 
                                 audio.tags.get('TITLE') or 
                                 audio.tags.get('\xa9nam'))  # iTunes format
@@ -295,7 +282,9 @@ def main(source_directory: str, storage_directory: str, logger: logging.Logger, 
     Main function to process audio files in the source directory and organize them into the storage directory.
     It renames files based on their metadata tags, organizes them into artist and album directories, and handles duplicates.
     Supports: MP3, FLAC, OGG, MP4/M4A, WMA, AAC, OPUS
-    """    
+    """     
+    start_time = time.time()
+    
     # Use provided extensions or defaults
     if audio_extensions is None:
         audio_extensions = ('.mp3', '.flac', '.ogg', '.mp4', '.m4a', '.wma', '.aac', '.opus')
@@ -476,17 +465,31 @@ def main(source_directory: str, storage_directory: str, logger: logging.Logger, 
                     except Exception as e:
                         logger.error(f"Error hashing file {fpath}: {e}")
 
-    logger.info(f"Total files processed: {stat_total_files}")
-    logger.info(f"Total newly added files: {stat_newly_added}")
-    logger.info(f"Total duplicates found: {stat_duplicates}")
-    logger.info(f"\tremoved: {stat_removed}")
-    logger.info(f"\tupdated: {stat_updated}")
+    # Display final statistics in table format
+    end_time = time.time()
+    processing_time = end_time - start_time
+    success_rate = (stat_newly_added + stat_updated) / stat_total_files * 100 if stat_total_files > 0 else 0
+    
+    logger.info("=" * 60)
+    logger.info("AUDIO FILES PROCESSING SUMMARY")
+    logger.info("=" * 60)
+    logger.info(f"{'Metric':<30} | {'Count':<10} | {'%':<10}")
+    logger.info("-" * 60)
+    logger.info(f"{'Total files processed':<30} | {stat_total_files:<10} | {'100.0%' if stat_total_files > 0 else '-':<10}")
+    logger.info(f"{'Newly added files':<30} | {stat_newly_added:<10} | {f'{stat_newly_added/stat_total_files*100:.1f}%' if stat_total_files > 0 else '-':<10}")
+    logger.info(f"{'Files updated':<30} | {stat_updated:<10} | {f'{stat_updated/stat_total_files*100:.1f}%' if stat_total_files > 0 else '-':<10}")
+    logger.info(f"{'Duplicates found':<30} | {stat_duplicates:<10} | {f'{stat_duplicates/stat_total_files*100:.1f}%' if stat_total_files > 0 else '-':<10}")
+    logger.info(f"{'Files removed':<30} | {stat_removed:<10} | {f'{stat_removed/stat_total_files*100:.1f}%' if stat_total_files > 0 else '-':<10}")
+    logger.info("-" * 60)
+    logger.info(f"{'Success rate':<30} | {f'{success_rate:.1f}%' if stat_total_files > 0 else '-':<10}")
+    logger.info(f"{'Processing time':<30} | {f'{processing_time:.2f}s':<10} ")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
-        description='Rename audio files based on their metadata tags. Supports MP3, FLAC, OGG, MP4/M4A, WMA.',
+        description='Rename audio files based on their metadata tags. Supports MP3, FLAC, OGG, MP4/M4A, WMA, AAC, OPUS.',
         epilog='Example:\n  python mp3tags.py -S "C:\\Music\\Unsorted" -T "C:\\Music\\Organized"',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
