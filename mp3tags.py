@@ -12,12 +12,14 @@
         - Command-line and configuration file support
         - INI-based configuration for logging and audio formats
         - Tabular output for processing statistics
+        - Automatic playlist generation for all processed files (configurable)
 
     Configuration:
         The script reads settings from mp3tags.ini file with sections:
         - [mp3tags]: source and storage directories
         - [logging]: log level, file path, format, console output
         - [audio_formats]: supported file extensions
+        - [playlists]: playlist generation settings, name template, and directory
     
     Usage:
         `python mp3tags.py -S "C:\\Music\\Unsorted" -T "C:\\Music\\Organized"`
@@ -38,7 +40,8 @@ Keyword arguments:
         audio_tag(filename, logger) -- Extracts the tags from an audio file using pytaglib (preferred) or mutagen (fallback).
         clean_string(s) -- Cleans a string by removing invalid characters for filenames.
         file_hash(filepath, chunk_size=8192) -- Computes SHA256 hash of a file.
-        main(source_directory, storage_directory, logger, audio_extensions) -- Main function to process audio files and organize them into the storage directory.
+        generate_playlists(all_files, storage_directory, logger, config, playlist_name, playlist_dir_override) -- Generates a playlist based on all processed files.
+        main(source_directory, storage_directory, logger, audio_extensions, config, playlist_name, playlist_dir) -- Main function to process audio files and organize them into the storage directory.
 
     Arguments:
         source_directory -- The directory containing the audio files to be processed.
@@ -51,7 +54,6 @@ Keyword arguments:
 
 TODO: 
     - Implement the renaming logic based on metadata tags
-    - Generate playlists based on the newly added files
     - Add monitoring for new files in the source directory
 
 """
@@ -277,7 +279,127 @@ def file_hash(filepath, chunk_size=8192):
             hasher.update(chunk)
     return hasher.hexdigest()
 
-def main(source_directory: str, storage_directory: str, logger: logging.Logger, audio_extensions=None) -> None:
+def collect_all_audio_files(storage_directory: str, audio_extensions: tuple, logger: logging.Logger) -> list:
+    """
+    Collect all audio files from the storage directory for playlist generation.
+    Returns a list of file info dictionaries.
+    """
+    all_files = []
+    
+    for root, dirs, files in os.walk(storage_directory):
+        for file in files:
+            if file.lower().endswith(audio_extensions):
+                filepath = os.path.join(root, file)
+                try:
+                    # Extract tags for each file
+                    file_info = audio_tag(filepath, logger)
+                    all_files.append({
+                        'filepath': filepath,
+                        'tags': file_info['tags'],
+                        'original_filename': file
+                    })
+                except Exception as e:
+                    logger.debug(f"Error processing {filepath} for playlist: {e}")
+    
+    logger.debug(f"Collected {len(all_files)} audio files from storage directory for playlist")
+    return all_files
+
+def generate_playlists(all_files: list, storage_directory: str, logger: logging.Logger, config=None, playlist_name=None, playlist_dir_override=None) -> None:
+    """
+    Generate a playlist based on all audio files in the storage directory.
+    Creates a single playlist with all audio tracks.
+    """
+    if not all_files:
+        logger.info("No audio files found in storage directory. Skipping playlist generation.")
+        return
+    
+    # Check if playlist generation is enabled
+    generate_enabled = True
+    if config:
+        try:
+            generate_enabled = config.getboolean('playlists', 'generate', fallback=True)
+        except (configparser.NoSectionError, configparser.NoOptionError):
+            pass
+    
+    if not generate_enabled:
+        logger.info("Playlist generation is disabled in configuration.")
+        return
+    
+    # Get playlist name from config or parameter
+    if playlist_name is None:
+        if config:
+            try:
+                playlist_name = config.get('playlists', 'name_template', fallback='Music Collection')
+            except (configparser.NoSectionError, configparser.NoOptionError):
+                playlist_name = 'Music Collection'
+        else:
+            playlist_name = 'Music Collection'
+    
+    playlist_name = playlist_name.replace('{date}', time.strftime('%Y-%m-%d'))
+    playlist_name = playlist_name.replace('{time}', time.strftime('%H-%M-%S'))
+    playlist_name = playlist_name.replace('{datetime}', time.strftime('%Y-%m-%d_%H-%M-%S'))
+    
+    logger.info(f"Generating playlist '{playlist_name}' for {len(all_files)} audio files...")
+    
+    # Get playlist directory from config or use storage directory root
+    playlist_dir = storage_directory  # Default to storage root
+    
+    # Command-line override has highest priority
+    if playlist_dir_override:
+        if os.path.isabs(playlist_dir_override):
+            playlist_dir = playlist_dir_override
+        else:
+            playlist_dir = os.path.join(storage_directory, playlist_dir_override)
+    elif config:
+        try:
+            config_dir = config.get('playlists', 'directory', fallback='').strip()
+            if config_dir:  # If directory is specified in config
+                if os.path.isabs(config_dir):
+                    # Absolute path
+                    playlist_dir = config_dir
+                else:
+                    # Relative path from storage directory
+                    playlist_dir = os.path.join(storage_directory, config_dir)
+        except (configparser.NoSectionError, configparser.NoOptionError):
+            pass
+    
+    # Create playlist directory if it doesn't exist (only if not storage root)
+    if playlist_dir != storage_directory:
+        os.makedirs(playlist_dir, exist_ok=True)
+    
+    # Generate playlist file
+    safe_playlist_name = clean_string(playlist_name)
+    playlist_path = os.path.join(playlist_dir, f"{safe_playlist_name}.m3u")
+    try:
+        with open(playlist_path, 'w', encoding='utf-8') as f:
+            f.write("#EXTM3U\n")
+            f.write(f"# {playlist_name} Playlist - Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"# Total tracks: {len(all_files)}\n\n")
+            
+            for file_info in all_files:
+                filepath = file_info['filepath']
+                tags = file_info['tags']
+                
+                # Get track info for extended M3U format
+                title = tags.get('TIT2') or tags.get('TITLE') or os.path.splitext(os.path.basename(filepath))[0]
+                artist = tags.get('TPE1') or tags.get('ARTIST') or 'Unknown Artist'
+                duration = tags.get('LENGTH', '')
+                
+                # Write extended info line
+                if duration:
+                    f.write(f"#EXTINF:{duration},{artist} - {title}\n")
+                else:
+                    f.write(f"#EXTINF:-1,{artist} - {title}\n")
+                
+                # Write relative path from playlist directory
+                rel_path = os.path.relpath(filepath, playlist_dir)
+                f.write(f"{rel_path}\n")
+        
+        logger.info(f"Created playlist '{playlist_name}' with {len(all_files)} tracks at '{playlist_path}'")
+    except Exception as e:
+        logger.error(f"Error creating playlist '{playlist_name}': {e}")
+
+def main(source_directory: str, storage_directory: str, logger: logging.Logger, audio_extensions=None, config=None, playlist_name=None, playlist_dir=None) -> None:
     """
     Main function to process audio files in the source directory and organize them into the storage directory.
     It renames files based on their metadata tags, organizes them into artist and album directories, and handles duplicates.
@@ -296,6 +418,7 @@ def main(source_directory: str, storage_directory: str, logger: logging.Logger, 
     stat_removed = 0
     stat_updated = 0
     stat_newly_added = 0
+    processed_files = []  # Track all processed files for playlist generation
 
     for audio_file in audio_files:
         file_path = os.path.join(source_directory, audio_file)
@@ -428,12 +551,22 @@ def main(source_directory: str, storage_directory: str, logger: logging.Logger, 
 
             else:
                 try:                    
-                    shutil.move(file_path, os.path.join(artist_directory, audio_file))
+                    destination_path = os.path.join(artist_directory, audio_file)
+                    shutil.move(file_path, destination_path)
                     stat_newly_added += 1
 
                 except Exception as e:
                     logger.error(f"Error moving file {file_path} to {artist_directory}: {e}")
                     logger.debug(f"File sizes:\n\tSource: {audio_file_size}\n\tDestination: {audio_file_size_destination}")
+
+            # Track all processed files for playlist generation (regardless of whether newly added, updated, or existing)
+            final_destination_path = os.path.join(artist_directory, audio_file)
+            if os.path.exists(final_destination_path):  # Only add if file exists in storage
+                processed_files.append({
+                    'filepath': final_destination_path,
+                    'tags': mp3_info['tags'],
+                    'original_filename': audio_file
+                })
 
             # Remove duplicate files with (N) suffix at the end
             # for i in range(1, 100):
@@ -464,6 +597,10 @@ def main(source_directory: str, storage_directory: str, logger: logging.Logger, 
                             existing_hashes[h] = fpath
                     except Exception as e:
                         logger.error(f"Error hashing file {fpath}: {e}")
+
+    # Generate playlists for all processed files
+    if processed_files:
+        generate_playlists(processed_files, storage_directory, logger, config, playlist_name, playlist_dir)
 
     # Display final statistics in table format
     end_time = time.time()
@@ -498,6 +635,8 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose logging (DEBUG level)')
     parser.add_argument('-q', '--quiet', action='store_true', help='Enable quiet mode (ERROR level only)')
     parser.add_argument('--log-file', default='mp3tags.log', help='Log file path (default: mp3tags.log)')
+    parser.add_argument('--playlist-name', help='Custom name for the generated playlist (supports {date}, {time}, {datetime} placeholders)')
+    parser.add_argument('--playlist-dir', help='Directory for playlist files (overrides INI config)')
 
     args = parser.parse_args()
 
@@ -538,4 +677,4 @@ if __name__ == "__main__":
         print("Example mp3tags.ini:\n\n[mp3tags]\nsource = C:\\Music\\Unsorted\nstorage = C:\\Music\\Organized\n")
         exit(1)
 
-    main(source_directory, storage_directory, logger, audio_extensions)
+    main(source_directory, storage_directory, logger, audio_extensions, config, args.playlist_name, args.playlist_dir)

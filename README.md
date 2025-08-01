@@ -24,6 +24,8 @@ This project provides a Python script for renaming and organizing audio files ba
 - Supports multiple audio formats with format-specific tag handling
 - **Configurable logging** with file and console output
 - **INI-based configuration** for all settings
+- **Automatic playlist generation** for all processed files with customizable names and locations
+- **Tabular statistics output** showing processing results
 
 ## Configuration
 
@@ -58,6 +60,34 @@ format = %%(asctime)s - %%(levelname)s - %%(message)s
 # Supported audio file extensions (comma-separated, case-insensitive)
 extensions = .mp3, .flac, .ogg, .mp4, .m4a, .wma, .aac, .opus
 ```
+
+### Playlist Configuration
+
+```ini
+[playlists]
+# Enable/disable playlist generation (true/false)
+generate = true
+# Playlist name template (supports {date}, {time}, {datetime} placeholders)
+# Examples: "New Additions", "Added {date}", "Music {datetime}"
+name_template = New Additions
+# Directory for playlists (empty = storage root, or specify path like "Playlists" or absolute path)
+directory =
+```
+
+**Playlist Configuration Options:**
+
+- `generate` - Enable or disable playlist generation
+- `name_template` - Template for playlist filename with placeholder support
+- `directory` - Where to save playlists:
+  - Empty (default) = Save in storage directory root
+  - Relative path (e.g., "Playlists") = Create subdirectory in storage directory
+  - Absolute path = Save to specific location
+
+**Playlist Name Placeholders:**
+
+- `{date}` - Current date (YYYY-MM-DD)
+- `{time}` - Current time (HH-MM-SS)
+- `{datetime}` - Date and time (YYYY-MM-DD_HH-MM-SS)
 
 ## Requirements
 
@@ -96,6 +126,12 @@ python mp3tags.py -q
 
 # With custom log file
 python mp3tags.py --log-file custom.log
+
+# With custom playlist name
+python mp3tags.py --playlist-name "Added {date}"
+
+# With custom playlist directory
+python mp3tags.py --playlist-dir "Playlists"
 ```
 
 ### Command-line Options
@@ -105,6 +141,8 @@ python mp3tags.py --log-file custom.log
 - `-v` or `--verbose`: Enable verbose logging (DEBUG level).
 - `-q` or `--quiet`: Enable quiet mode (ERROR level only).
 - `--log-file`: Specify custom log file path.
+- `--playlist-name`: Custom name for the generated playlist (supports {date}, {time}, {datetime} placeholders).
+- `--playlist-dir`: Directory for playlist files (overrides INI config).
 
 ## License
 
